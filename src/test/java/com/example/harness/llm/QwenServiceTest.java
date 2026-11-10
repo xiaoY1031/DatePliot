@@ -1,15 +1,24 @@
 package com.example.harness.llm;
 
+import com.example.harness.tool.AgentTool;
 import com.example.harness.tool.ProjectInfoTool;
+import com.example.harness.tool.ToolDefinition;
 import com.example.harness.tool.ToolExecutor;
+import com.example.harness.tool.ToolInvocation;
+import com.example.harness.tool.ToolRegistry;
+import com.example.harness.tool.ToolResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
+import java.util.List;
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.*;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
@@ -19,8 +28,7 @@ class QwenServiceTest {
     void stopsAgentAfterTenModelRequests() {
         RestClient.Builder builder = RestClient.builder();
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
-        QwenService service = new QwenService("test-key", "https://example.test/v1",
-                "qwen-plus", new ToolExecutor(new ProjectInfoTool()), new ObjectMapper(), builder);
+        QwenService service = createService(builder);
         for (int round = 0; round < 10; round++) {
             server.expect(requestTo("https://example.test/v1/chat/completions"))
                     .andExpect(jsonPath("$.tools[0].function.name").value("get_project_info"))
@@ -41,8 +49,7 @@ class QwenServiceTest {
     void returnsFullResponseForFinalAnswer() {
         RestClient.Builder builder = RestClient.builder();
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
-        QwenService service = new QwenService("test-key", "https://example.test/v1",
-                "qwen-plus", new ToolExecutor(new ProjectInfoTool()), new ObjectMapper(), builder);
+        QwenService service = createService(builder);
         server.expect(requestTo("https://example.test/v1/chat/completions"))
                 .andExpect(jsonPath("$.tools[0].function.name").value("get_project_info"))
                 .andExpect(jsonPath("$.messages[0].tool_call_id").value("call_1"))
@@ -62,8 +69,7 @@ class QwenServiceTest {
     void preservesToolCallsInFullResponse() {
         RestClient.Builder builder = RestClient.builder();
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
-        QwenService service = new QwenService("test-key", "https://example.test/v1",
-                "qwen-plus", new ToolExecutor(new ProjectInfoTool()), new ObjectMapper(), builder);
+        QwenService service = createService(builder);
         server.expect(requestTo("https://example.test/v1/chat/completions"))
                 .andRespond(withSuccess("""
                         {"choices":[{"message":{"role":"assistant","content":null,
@@ -82,9 +88,9 @@ class QwenServiceTest {
         RestClient.Builder builder = RestClient.builder();
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
         ToolExecutor tool = org.mockito.Mockito.mock(ToolExecutor.class);
-        org.mockito.Mockito.when(tool.execute("get_project_info")).thenReturn("CampusX 项目信息");
-        QwenService service = new QwenService("test-key", "https://example.test/v1",
-                "qwen-plus", tool, new ObjectMapper(), builder);
+        org.mockito.Mockito.when(tool.execute("call_1", "get_project_info", "{}"))
+                .thenReturn(ToolResult.success("CampusX 项目信息"));
+        QwenService service = createService(builder, tool, projectInfoRegistry());
         server.expect(requestTo("https://example.test/v1/chat/completions"))
                 .andExpect(jsonPath("$.tool_choice").value("auto"))
                 .andExpect(jsonPath("$.tools[0].function.parameters.additionalProperties").value(false))
@@ -106,7 +112,7 @@ class QwenServiceTest {
                         {"choices":[{"message":{"role":"assistant","content":"这是模型整理后的项目信息。"}}]}
                         """, MediaType.APPLICATION_JSON));
         assertEquals("这是模型整理后的项目信息。", service.chatWithTools("查询 CampusX 的技术栈"));
-        org.mockito.Mockito.verify(tool).execute("get_project_info");
+        org.mockito.Mockito.verify(tool).execute("call_1", "get_project_info", "{}");
         org.mockito.Mockito.verifyNoMoreInteractions(tool);
         server.verify();
     }
@@ -116,8 +122,7 @@ class QwenServiceTest {
     void executesToolAndSendsResultBackWithMatchingId() {
         RestClient.Builder builder = RestClient.builder();
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
-        QwenService service = new QwenService("test-key", "https://example.test/v1",
-                "qwen-plus", new ToolExecutor(new ProjectInfoTool()), new ObjectMapper(), builder);
+        QwenService service = createService(builder);
 
         server.expect(requestTo("https://example.test/v1/chat/completions"))
                 .andExpect(jsonPath("$.tools[0].function.name").value("get_project_info"))
@@ -143,13 +148,114 @@ class QwenServiceTest {
     void returnsOrdinaryAnswerWithoutCallingTool() {
         RestClient.Builder builder = RestClient.builder();
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
-        QwenService service = new QwenService("test-key", "https://example.test/v1",
-                "qwen-plus", new ToolExecutor(new ProjectInfoTool()), new ObjectMapper(), builder);
+        QwenService service = createService(builder);
         server.expect(requestTo("https://example.test/v1/chat/completions"))
                 .andRespond(withSuccess("""
                         {"choices":[{"message":{"role":"assistant","content":"你好"}}]}
                         """, MediaType.APPLICATION_JSON));
         assertEquals("你好", service.chatWithTools("你好"));
         server.verify();
+    }
+
+    @Test
+    void exposesDefinitionsFromRegistry() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        AgentTool registryOnlyTool = new AgentTool() {
+            private final ToolDefinition definition = new ToolDefinition(
+                    "registry_only_tool",
+                    "仅用于验证 Registry 动态暴露工具",
+                    Map.of(
+                            "type", "object",
+                            "properties", Map.of(),
+                            "required", List.of(),
+                            "additionalProperties", false));
+
+            @Override
+            public ToolDefinition definition() {
+                return definition;
+            }
+
+            @Override
+            public ToolResult execute(ToolInvocation invocation) {
+                return ToolResult.success("ok");
+            }
+        };
+        ToolRegistry registry = new ToolRegistry(List.of(registryOnlyTool));
+        ObjectMapper mapper = new ObjectMapper();
+        QwenService service = createService(
+                builder, new ToolExecutor(registry, mapper), registry, mapper);
+
+        server.expect(requestTo("https://example.test/v1/chat/completions"))
+                .andExpect(jsonPath("$.tools.length()").value(1))
+                .andExpect(jsonPath("$.tools[0].function.name").value("registry_only_tool"))
+                .andRespond(withSuccess("""
+                        {"choices":[{"message":{"role":"assistant","content":"ok"}}]}
+                        """, MediaType.APPLICATION_JSON));
+
+        service.getFinalAnswer(List.of());
+        server.verify();
+    }
+
+    @Test
+    void returnsToolErrorsToModelAndContinuesAgentLoop() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        QwenService service = createService(builder);
+
+        server.expect(requestTo("https://example.test/v1/chat/completions"))
+                .andRespond(withSuccess("""
+                        {"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[
+                        {"id":"call_unknown","type":"function","function":{
+                        "name":"missing_tool","arguments":"{}"}},
+                        {"id":"call_invalid","type":"function","function":{
+                        "name":"get_project_info","arguments":"{\\"unexpected\\":true}"}}
+                        ]}}]}
+                        """, MediaType.APPLICATION_JSON));
+        server.expect(requestTo("https://example.test/v1/chat/completions"))
+                .andExpect(jsonPath("$.messages[2].tool_call_id").value("call_unknown"))
+                .andExpect(jsonPath("$.messages[2].content",
+                        containsString("UNKNOWN_TOOL")))
+                .andExpect(jsonPath("$.messages[3].tool_call_id").value("call_invalid"))
+                .andExpect(jsonPath("$.messages[3].content",
+                        containsString("INVALID_ARGUMENTS")))
+                .andRespond(withSuccess("""
+                        {"choices":[{"message":{"role":"assistant","content":"已处理工具错误。"}}]}
+                        """, MediaType.APPLICATION_JSON));
+
+        assertEquals("已处理工具错误。", service.runAgent("测试错误工具调用"));
+        server.verify();
+    }
+
+    private QwenService createService(RestClient.Builder builder) {
+        ToolRegistry registry = projectInfoRegistry();
+        ObjectMapper mapper = new ObjectMapper();
+        return createService(builder, new ToolExecutor(registry, mapper), registry, mapper);
+    }
+
+    private QwenService createService(
+            RestClient.Builder builder,
+            ToolExecutor executor,
+            ToolRegistry registry) {
+        return createService(builder, executor, registry, new ObjectMapper());
+    }
+
+    private QwenService createService(
+            RestClient.Builder builder,
+            ToolExecutor executor,
+            ToolRegistry registry,
+            ObjectMapper mapper) {
+        return new QwenService(
+                "test-key",
+                "https://example.test/v1",
+                "qwen-plus",
+                executor,
+                registry,
+                mapper,
+                builder);
+    }
+
+    private ToolRegistry projectInfoRegistry() {
+        return new ToolRegistry(List.of(new ProjectInfoTool()));
     }
 }

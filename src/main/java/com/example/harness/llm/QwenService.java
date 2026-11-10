@@ -2,9 +2,11 @@ package com.example.harness.llm;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.example.harness.tool.ToolDefinition;
 import com.example.harness.tool.ToolExecutor;
+import com.example.harness.tool.ToolRegistry;
+import com.example.harness.tool.ToolResult;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
@@ -20,6 +22,7 @@ public class QwenService implements LlmClient {
     private final String apiKey;
     private final String model;
     private final ToolExecutor toolExecutor;
+    private final ToolRegistry toolRegistry;
     private final ObjectMapper objectMapper;
     private static final int MAX_AGENT_ROUNDS = 10;
 
@@ -29,12 +32,14 @@ public class QwenService implements LlmClient {
             @Value("${qwen.base-url}") String baseUrl,
             @Value("${qwen.model}") String model,
             ToolExecutor toolExecutor,
+            ToolRegistry toolRegistry,
             ObjectMapper objectMapper,
             RestClient.Builder builder) {
 
         this.apiKey = apiKey;
         this.model = model;
         this.toolExecutor = toolExecutor;
+        this.toolRegistry = toolRegistry;
         this.objectMapper = objectMapper;
         this.restClient = builder
                 .baseUrl(baseUrl)
@@ -79,8 +84,14 @@ public class QwenService implements LlmClient {
                 if (id.isBlank() || !"function".equals(toolCall.path("type").asText())) {
                     throw new IllegalStateException("千问返回的工具调用缺少 ID 或类型无效");
                 }
-                String result = executeToolWithArguments(toolCall, name);
-                messages.add(Map.of("role", "tool", "tool_call_id", id, "content", result));
+                ToolResult result = toolExecutor.execute(
+                        id,
+                        name,
+                        toolCall.path("function").path("arguments").asText(null));
+                messages.add(Map.of(
+                        "role", "tool",
+                        "tool_call_id", id,
+                        "content", result.toModelContent()));
             }
         }
         throw new IllegalStateException("Agent 超过最大循环次数 10 轮");
@@ -112,11 +123,14 @@ public class QwenService implements LlmClient {
             if (toolCallId.isBlank()) {
                 throw new IllegalStateException("千问返回的工具调用缺少 ID");
             }
-            String result = toolExecutor.execute(toolName);
+            ToolResult result = toolExecutor.execute(
+                    toolCallId,
+                    toolName,
+                    toolCall.path("function").path("arguments").asText(null));
             messages.add(Map.of(
                     "role", "tool",
                     "tool_call_id", toolCallId,
-                    "content", result
+                    "content", result.toModelContent()
             ));
         }
 
@@ -164,22 +178,20 @@ public class QwenService implements LlmClient {
         return extractChoice(sendRequest(requestBody));
     }
 
-    /** 返回可用工具的 JSON Schema 描述；当前仅支持无参数的 get_project_info。 */
+    /** Returns function tool definitions generated from the tools registered in Spring. */
     private List<Map<String, Object>> toolDefinitions() {
-        //工具描述
-        return List.of(Map.of(
-                        "type", "function",
-                        "function", Map.of(
-                                "name", "get_project_info",
-                                "description", "查询 CampusX 项目的基本信息和技术栈",
-                                //调用这个工具时，需要传入什么参数。
-                                "parameters", Map.of(
-                                        "type", "object",//参数整体是一个对象
-                                        "properties", Map.of(),//这个对象有哪些参数
-                                        "required", List.of(),//哪些参数必填
-                                        "additionalProperties", false)//是否允许额外的参数
-                        )
-                ));
+        return toolRegistry.listDefinitions().stream()
+                .map(this::toFunctionTool)
+                .toList();
+    }
+
+    private Map<String, Object> toFunctionTool(ToolDefinition definition) {
+        return Map.of(
+                "type", "function",
+                "function", Map.of(
+                        "name", definition.name(),
+                        "description", definition.description(),
+                        "parameters", definition.parameters()));
     }
 
     /**
@@ -239,23 +251,4 @@ public class QwenService implements LlmClient {
         return toolCalls;
     }
 
-    /**
-     * 为多轮 chat 流程检查工具名称和参数，再交给执行器。
-     * 当前工具要求 arguments 是空的 JSON 对象；不支持的名称或无效参数返回工具错误文本。
-     */
-    private String executeToolWithArguments(JsonNode toolCall, String name) {
-        if (!"get_project_info".equals(name)) {
-            return "工具错误：不支持的工具 " + name;
-        }
-        try {
-            JsonNode arguments = objectMapper.readTree(
-                    toolCall.path("function").path("arguments").asText());
-            if (arguments == null || !arguments.isObject() || !arguments.isEmpty()) {
-                return "工具错误：get_project_info 的参数必须是空对象 {}";
-            }
-            return toolExecutor.execute(name);
-        } catch (JsonProcessingException e) {
-            return "工具错误：参数不是有效 JSON";
-        }
-    }
 }
