@@ -2,7 +2,7 @@ package com.example.harness.tool;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
-/** One model-requested tool call after its arguments have been parsed. */
+/** 模型发起且参数已经解析的单次工具调用。 */
 public record ToolInvocation(
         String toolCallId,
         String name,

@@ -1,20 +1,19 @@
 package com.example.harness.llm;
 
-import com.example.harness.tool.AgentTool;
+import com.example.harness.tool.ListFilesTool;
 import com.example.harness.tool.ProjectInfoTool;
-import com.example.harness.tool.ToolDefinition;
 import com.example.harness.tool.ToolExecutor;
-import com.example.harness.tool.ToolInvocation;
 import com.example.harness.tool.ToolRegistry;
 import com.example.harness.tool.ToolResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
+import java.nio.file.Path;
 import java.util.List;
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -158,37 +157,23 @@ class QwenServiceTest {
     }
 
     @Test
-    void exposesDefinitionsFromRegistry() {
+    void exposesDefinitionsFromRegistry(@TempDir Path workspace) {
         RestClient.Builder builder = RestClient.builder();
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
-        AgentTool registryOnlyTool = new AgentTool() {
-            private final ToolDefinition definition = new ToolDefinition(
-                    "registry_only_tool",
-                    "仅用于验证 Registry 动态暴露工具",
-                    Map.of(
-                            "type", "object",
-                            "properties", Map.of(),
-                            "required", List.of(),
-                            "additionalProperties", false));
-
-            @Override
-            public ToolDefinition definition() {
-                return definition;
-            }
-
-            @Override
-            public ToolResult execute(ToolInvocation invocation) {
-                return ToolResult.success("ok");
-            }
-        };
-        ToolRegistry registry = new ToolRegistry(List.of(registryOnlyTool));
+        ToolRegistry registry = new ToolRegistry(List.of(new ListFilesTool(workspace.toString())));
         ObjectMapper mapper = new ObjectMapper();
         QwenService service = createService(
                 builder, new ToolExecutor(registry, mapper), registry, mapper);
 
         server.expect(requestTo("https://example.test/v1/chat/completions"))
                 .andExpect(jsonPath("$.tools.length()").value(1))
-                .andExpect(jsonPath("$.tools[0].function.name").value("registry_only_tool"))
+                .andExpect(jsonPath("$.tools[0].function.name").value("list_files"))
+                .andExpect(jsonPath("$.tools[0].function.parameters.properties.path.type")
+                        .value("string"))
+                .andExpect(jsonPath("$.tools[0].function.parameters.required[0]")
+                        .value("path"))
+                .andExpect(jsonPath("$.tools[0].function.parameters.additionalProperties")
+                        .value(false))
                 .andRespond(withSuccess("""
                         {"choices":[{"message":{"role":"assistant","content":"ok"}}]}
                         """, MediaType.APPLICATION_JSON));

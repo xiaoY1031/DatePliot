@@ -12,7 +12,7 @@ public class ToolRegistry {
 
     private final Map<String, AgentTool> tools = new ConcurrentHashMap<>();
 
-    /** Spring injects every AgentTool bean and registers it during application startup. */
+    /** Spring 在应用启动时注入并注册全部 AgentTool Bean。 */
     public ToolRegistry(List<AgentTool> agentTools) {
         agentTools.forEach(this::register);
     }

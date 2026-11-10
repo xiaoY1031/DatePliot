@@ -1,6 +1,6 @@
 package com.example.harness.tool;
 
-/** Structured result used internally before it is converted to model-readable text. */
+/** 工具内部使用的结构化结果，返回模型前会转换为文本。 */
 public record ToolResult(
         boolean success,
         String content,
@@ -23,7 +23,7 @@ public record ToolResult(
         return new ToolResult(false, message, errorCode);
     }
 
-    /** Keeps the current Qwen tool-message protocol based on string content. */
+    /** 转换为字符串内容，保持当前千问工具消息协议不变。 */
     public String toModelContent() {
         return success ? content : "工具错误[" + errorCode + "]：" + content;
     }

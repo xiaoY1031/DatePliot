@@ -178,7 +178,7 @@ public class QwenService implements LlmClient {
         return extractChoice(sendRequest(requestBody));
     }
 
-    /** Returns function tool definitions generated from the tools registered in Spring. */
+    /** 根据 Spring 中注册的工具生成模型所需的函数工具定义。 */
     private List<Map<String, Object>> toolDefinitions() {
         return toolRegistry.listDefinitions().stream()
                 .map(this::toFunctionTool)

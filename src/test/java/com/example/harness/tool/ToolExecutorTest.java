@@ -29,6 +29,7 @@ class ToolExecutorTest {
         assertTrue(result.contains("Spring Boot"));
         assertTrue(result.contains("Redis"));
         assertTrue(toolRegistry.find("get_project_info").isPresent());
+        assertTrue(toolRegistry.find("list_files").isPresent());
     }
 
     @Test

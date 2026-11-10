@@ -7,16 +7,47 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @Component
-public class ListFilesTool {
+public class ListFilesTool implements AgentTool {
+
+    private static final ToolDefinition DEFINITION = new ToolDefinition(
+            "list_files",
+            "列出工作区内指定相对目录的直接子项，不递归读取文件内容",
+            Map.of(
+                    "type", "object",
+                    "properties", Map.of(
+                            "path", Map.of(
+                                    "type", "string",
+                                    "description", "相对于工作区根目录的目录路径，例如 . 或 src/main")),
+                    "required", List.of("path"),
+                    "additionalProperties", false));
 
     private final String workspace;
 
     /** 由 Spring 注入允许访问的项目根目录，便于统一限制工具访问范围。 */
     public ListFilesTool(@Value("${harness.workspace}") String workspace) {
         this.workspace = workspace;
+    }
+
+    @Override
+    public ToolDefinition definition() {
+        return DEFINITION;
+    }
+
+    @Override
+    public ToolResult execute(ToolInvocation invocation) {
+        String relativePath = invocation.arguments().path("path").asText();
+        try {
+            return ToolResult.success(listFiles(relativePath));
+        } catch (IllegalArgumentException e) {
+            return ToolResult.failure("INVALID_ARGUMENTS", e.getMessage());
+        } catch (IOException e) {
+            return ToolResult.failure("EXECUTION_ERROR", "读取目录失败：" + e.getMessage());
+        }
     }
 
     /**

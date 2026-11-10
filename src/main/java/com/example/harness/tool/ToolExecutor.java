@@ -19,12 +19,12 @@ public class ToolExecutor {
         this.objectMapper = objectMapper;
     }
 
-    /** Compatibility entry point for existing no-argument callers. */
+    /** 兼容现有无参数工具调用方的执行入口。 */
     public String execute(String toolName) {
         return execute(null, toolName, "{}").toModelContent();
     }
 
-    /** Parses raw model arguments without allowing malformed calls to abort the agent loop. */
+    /** 解析模型返回的原始参数，并将格式错误转换为工具结果，避免中断智能体循环。 */
     public ToolResult execute(String toolCallId, String toolName, String rawArguments) {
         AgentTool tool = toolRegistry.find(toolName).orElse(null);
         if (tool == null) {
@@ -69,7 +69,7 @@ public class ToolExecutor {
         }
     }
 
-    /** Minimal validation for the object schemas currently supported by local tools. */
+    /** 对当前本地工具支持的对象参数 Schema 进行基础校验。 */
     private String validateArguments(ToolDefinition definition, JsonNode arguments) {
         if (arguments == null || !arguments.isObject()) {
             return definition.name() + " 的参数必须是 JSON 对象";

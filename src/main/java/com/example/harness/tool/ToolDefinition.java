@@ -2,7 +2,7 @@ package com.example.harness.tool;
 
 import java.util.Map;
 
-/** Tool metadata exposed to the model. */
+/** 向模型暴露的工具元数据。 */
 public record ToolDefinition(
         String name,
         String description,
