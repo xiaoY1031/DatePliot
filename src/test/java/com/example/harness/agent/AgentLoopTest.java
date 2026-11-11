@@ -1,77 +1,164 @@
 package com.example.harness.agent;
 
-import com.example.harness.llm.QwenService;
+import com.example.harness.llm.LlmClient;
+import com.example.harness.llm.model.LlmMessage;
+import com.example.harness.llm.model.LlmRequest;
+import com.example.harness.llm.model.LlmResponse;
+import com.example.harness.llm.model.LlmToolCall;
+import com.example.harness.tool.ProjectInfoTool;
 import com.example.harness.tool.ToolExecutor;
+import com.example.harness.tool.ToolRegistry;
+import com.example.harness.tool.ToolResult;
 import org.junit.jupiter.api.Test;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.times;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class AgentLoopTest {
 
-    /** 模拟有工具调用、空数组、null 和缺失字段，验证分支判断；不调用真实 API。 */
-    @ParameterizedTest
-    @ValueSource(strings = {"[]", "null", "missing", "[{\"function\":{\"name\":\"get_project_info\"}}]"})
-    void identifiesToolCalls(String toolCalls) throws Exception {
-        QwenService service = mock(QwenService.class);
-        String field = "missing".equals(toolCalls) ? "" : ",\"tool_calls\":" + toolCalls;
-        var response = new ObjectMapper().readTree(
-                "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"你好\"" + field + "}}]}");
-        when(service.getFinalAnswer(List.of())).thenReturn(response);
+    @Test
+    void returnsOrdinaryAnswerWithoutCallingTool() {
+        LlmClient client = mock(LlmClient.class);
+        ToolExecutor executor = mock(ToolExecutor.class);
+        when(client.complete(any())).thenReturn(response("你好"));
 
-        assertEquals(toolCalls.startsWith("[{"), new AgentLoop(service, mock(ToolExecutor.class),
-                new ObjectMapper()).needsToolCall(List.of()));
+        String answer = createLoop(client, executor).run("你好");
+
+        assertEquals("你好", answer);
+        verify(client).complete(any());
+        verify(executor, times(0)).execute(anyString(), anyString(), anyString());
     }
 
-    /** 验证两轮工具调用后的消息历史完整，并在第三轮直接回答时结束。 */
     @Test
-    void continuesUntilModelAnswers() throws Exception {
-        QwenService service = mock(QwenService.class);
+    void executesMultipleToolCallsWithArgumentsAndMatchingIds() {
+        LlmClient client = mock(LlmClient.class);
         ToolExecutor executor = mock(ToolExecutor.class);
-        ObjectMapper mapper = new ObjectMapper();
-        var toolResponse = mapper.readTree("""
-                {"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{
-                "id":"call_1","type":"function","function":{"name":"get_project_info","arguments":"{}"}}]}}]}
-                """);
-        when(executor.execute("get_project_info")).thenReturn("CampusX");
-        when(service.getFinalAnswer(anyList())).thenAnswer(invocation -> {
-            List<java.util.Map<String, Object>> history = invocation.getArgument(0);
-            if (history.size() == 1 || history.size() == 3) {
-                return toolResponse;
+        AtomicInteger requests = new AtomicInteger();
+        when(client.complete(any())).thenAnswer(invocation -> {
+            if (requests.getAndIncrement() == 0) {
+                return new LlmResponse(LlmMessage.assistant(null, List.of(
+                        new LlmToolCall("call_1", "function", "get_project_info", "{}"),
+                        new LlmToolCall("call_2", "function", "list_files", "{\"path\":\"src\"}"))),
+                        "tool_calls");
             }
-            assertEquals(5, history.size());
-            assertEquals("assistant", history.get(1).get("role"));
-            assertEquals("call_1", history.get(2).get("tool_call_id"));
-            assertEquals("CampusX", history.get(4).get("content"));
-            return mapper.readTree("{\"choices\":[{\"message\":{\"content\":\"最终回答\"}}]}");
+            LlmRequest request = invocation.getArgument(0);
+            assertEquals(4, request.messages().size());
+            assertEquals("call_1", request.messages().get(2).toolCallId());
+            assertEquals("项目结果", request.messages().get(2).content());
+            assertEquals("call_2", request.messages().get(3).toolCallId());
+            assertEquals("目录结果", request.messages().get(3).content());
+            return response("最终回答");
         });
-        assertEquals("最终回答", new AgentLoop(service, executor, mapper).run("项目介绍"));
-        verify(executor, times(2)).execute("get_project_info");
-        verify(service, times(3)).getFinalAnswer(anyList());
+        when(executor.execute("call_1", "get_project_info", "{}"))
+                .thenReturn(ToolResult.success("项目结果"));
+        when(executor.execute("call_2", "list_files", "{\"path\":\"src\"}"))
+                .thenReturn(ToolResult.success("目录结果"));
+
+        assertEquals("最终回答", createLoop(client, executor).run("查看项目和目录"));
+        verify(executor).execute("call_1", "get_project_info", "{}");
+        verify(executor).execute("call_2", "list_files", "{\"path\":\"src\"}");
     }
 
-    /** 验证模型一直请求工具时，在上限处结束并报错，不无限执行。 */
     @Test
-    void stopsRepeatedToolCallsAtLimit() throws Exception {
-        QwenService service = mock(QwenService.class);
+    void returnsToolErrorsToModelAndContinues() {
+        LlmClient client = mock(LlmClient.class);
         ToolExecutor executor = mock(ToolExecutor.class);
-        ObjectMapper mapper = new ObjectMapper();
-        when(service.getFinalAnswer(anyList())).thenReturn(mapper.readTree("""
-                {"choices":[{"message":{"role":"assistant","tool_calls":[{
-                "id":"call_1","type":"function","function":{"name":"get_project_info","arguments":"{}"}}]}}]}
-                """));
-        when(executor.execute("get_project_info")).thenReturn("CampusX");
-        assertThrows(IllegalStateException.class, () -> new AgentLoop(service, executor, mapper).run("介绍"));
-        verify(executor, times(4)).execute("get_project_info");
+        when(client.complete(any()))
+                .thenReturn(new LlmResponse(LlmMessage.assistant(null, List.of(
+                        new LlmToolCall("call_unknown", "function", "missing_tool", "{}"))),
+                        "tool_calls"))
+                .thenAnswer(invocation -> {
+                    LlmRequest request = invocation.getArgument(0);
+                    assertThat(request.messages().get(2).content(), containsString("UNKNOWN_TOOL"));
+                    return response("已处理工具错误。");
+                });
+        when(executor.execute("call_unknown", "missing_tool", "{}"))
+                .thenReturn(ToolResult.failure("UNKNOWN_TOOL", "不支持的工具：missing_tool"));
+
+        assertEquals("已处理工具错误。", createLoop(client, executor).run("测试未知工具"));
+    }
+
+    @Test
+    void returnsInvalidArgumentsToModelAndContinues() {
+        LlmClient client = mock(LlmClient.class);
+        ToolExecutor executor = mock(ToolExecutor.class);
+        when(client.complete(any()))
+                .thenReturn(new LlmResponse(LlmMessage.assistant(null, List.of(
+                        new LlmToolCall("call_invalid", "function", "get_project_info", ""))),
+                        "tool_calls"))
+                .thenAnswer(invocation -> {
+                    LlmRequest request = invocation.getArgument(0);
+                    assertThat(request.messages().get(2).content(), containsString("INVALID_ARGUMENTS"));
+                    return response("已处理参数错误。");
+                });
+        when(executor.execute("call_invalid", "get_project_info", ""))
+                .thenReturn(ToolResult.failure("INVALID_ARGUMENTS", "参数不是有效 JSON"));
+
+        assertEquals("已处理参数错误。", createLoop(client, executor).run("测试非法参数"));
+    }
+
+    @Test
+    void exposesRegistryDefinitionsOnEveryModelRequest() {
+        LlmClient client = mock(LlmClient.class);
+        ToolExecutor executor = mock(ToolExecutor.class);
+        when(client.complete(any())).thenReturn(response("完成"));
+
+        createLoop(client, executor).run("项目介绍");
+
+        ArgumentCaptor<LlmRequest> captor = ArgumentCaptor.forClass(LlmRequest.class);
+        verify(client).complete(captor.capture());
+        assertEquals("get_project_info", captor.getValue().toolDefinitions().get(0).name());
+    }
+
+    @Test
+    void rejectsBlankFinalAnswer() {
+        LlmClient client = mock(LlmClient.class);
+        when(client.complete(any())).thenReturn(response(" "));
+
+        var error = assertThrows(IllegalStateException.class,
+                () -> createLoop(client, mock(ToolExecutor.class)).run("你好"));
+        assertEquals("千问 API 没有返回有效回答", error.getMessage());
+    }
+
+    @Test
+    void stopsAfterTenModelRequests() {
+        LlmClient client = mock(LlmClient.class);
+        ToolExecutor executor = mock(ToolExecutor.class);
+        when(client.complete(any())).thenReturn(new LlmResponse(
+                LlmMessage.assistant(null, List.of(
+                        new LlmToolCall("call_1", "function", "get_project_info", "{}"))),
+                "tool_calls"));
+        when(executor.execute("call_1", "get_project_info", "{}"))
+                .thenReturn(ToolResult.success("项目信息"));
+
+        var error = assertThrows(IllegalStateException.class,
+                () -> createLoop(client, executor).run("项目介绍"));
+
+        assertEquals("Agent 超过最大循环次数 10 轮", error.getMessage());
+        verify(client, times(10)).complete(any());
+        verify(executor, times(10)).execute("call_1", "get_project_info", "{}");
+    }
+
+    private AgentLoop createLoop(LlmClient client, ToolExecutor executor) {
+        return new AgentLoop(
+                client,
+                executor,
+                new ToolRegistry(List.of(new ProjectInfoTool())));
+    }
+
+    private LlmResponse response(String content) {
+        return new LlmResponse(LlmMessage.assistant(content, List.of()), "stop");
     }
 }
