@@ -33,8 +33,10 @@ class QwenClientTest {
         server.expect(requestTo("https://example.test/v1/chat/completions"))
                 .andExpect(header("Authorization", "Bearer test-key"))
                 .andExpect(jsonPath("$.model").value("qwen-plus"))
-                .andExpect(jsonPath("$.messages[0].role").value("user"))
-                .andExpect(jsonPath("$.messages[0].content").value("你好"))
+                .andExpect(jsonPath("$.messages[0].role").value("system"))
+                .andExpect(jsonPath("$.messages[0].content").value("系统提示"))
+                .andExpect(jsonPath("$.messages[1].role").value("user"))
+                .andExpect(jsonPath("$.messages[1].content").value("你好"))
                 .andExpect(jsonPath("$.tools[0].function.name").value("get_project_info"))
                 .andExpect(jsonPath("$.tool_choice").value("auto"))
                 .andRespond(withSuccess("""
@@ -43,7 +45,7 @@ class QwenClientTest {
                         """, MediaType.APPLICATION_JSON));
 
         var response = client.complete(new LlmRequest(
-                List.of(LlmMessage.user("你好")),
+                List.of(LlmMessage.system("系统提示"), LlmMessage.user("你好")),
                 List.of(new ProjectInfoTool().definition())));
 
         assertEquals("你好", response.assistantMessage().content());

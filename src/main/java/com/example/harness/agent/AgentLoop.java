@@ -5,6 +5,8 @@ import com.example.harness.llm.model.LlmMessage;
 import com.example.harness.llm.model.LlmRequest;
 import com.example.harness.llm.model.LlmResponse;
 import com.example.harness.llm.model.LlmToolCall;
+import com.example.harness.context.ContextManager;
+import com.example.harness.task.TaskState;
 import com.example.harness.tool.ToolExecutor;
 import com.example.harness.tool.ToolRegistry;
 import com.example.harness.tool.ToolResult;
@@ -21,25 +23,33 @@ public class AgentLoop {
     private final LlmClient llmClient;
     private final ToolExecutor toolExecutor;
     private final ToolRegistry toolRegistry;
+    private final ContextManager contextManager;
 
     /** 由 Spring 注入模型客户端、工具执行器和注册表。 */
-    public AgentLoop(LlmClient llmClient, ToolExecutor toolExecutor, ToolRegistry toolRegistry) {
+    public AgentLoop(
+            LlmClient llmClient,
+            ToolExecutor toolExecutor,
+            ToolRegistry toolRegistry,
+            ContextManager contextManager) {
         this.llmClient = llmClient;
         this.toolExecutor = toolExecutor;
         this.toolRegistry = toolRegistry;
+        this.contextManager = contextManager;
     }
 
     /**
      * 维护单次请求的完整消息历史，最多请求模型十次。
      * 有工具调用时保存 assistant 消息、执行全部工具并追加对应结果；否则返回最终正文。
      */
-    public String run(String question) {
-        List<LlmMessage> messages = new ArrayList<>();
-        messages.add(LlmMessage.user(question));
+    public String run(TaskState task, String userMessage) {
+        contextManager.appendUserMessage(task, userMessage);
         var toolDefinitions = toolRegistry.listDefinitions();
 
         for (int round = 0; round < MAX_MODEL_REQUESTS; round++) {
-            LlmResponse response = llmClient.complete(new LlmRequest(messages, toolDefinitions));
+            contextManager.recordModelRequest(task);
+            LlmResponse response = llmClient.complete(new LlmRequest(
+                    contextManager.buildMessages(task),
+                    toolDefinitions));
             LlmMessage assistantMessage = response.assistantMessage();
             List<LlmToolCall> toolCalls = assistantMessage.toolCalls();
 
@@ -47,17 +57,19 @@ public class AgentLoop {
                 if (assistantMessage.content() == null || assistantMessage.content().isBlank()) {
                     throw new IllegalStateException("千问 API 没有返回有效回答");
                 }
+                contextManager.appendFinalAnswer(task, assistantMessage);
                 return assistantMessage.content();
             }
 
-            messages.add(assistantMessage);
+            List<LlmMessage> toolMessages = new ArrayList<>();
             for (LlmToolCall toolCall : toolCalls) {
                 ToolResult result = toolExecutor.execute(
                         toolCall.id(),
                         toolCall.name(),
                         toolCall.arguments());
-                messages.add(LlmMessage.tool(toolCall.id(), result.toModelContent()));
+                toolMessages.add(LlmMessage.tool(toolCall.id(), result.toModelContent()));
             }
+            contextManager.appendToolExchange(task, assistantMessage, toolMessages);
         }
 
         throw new IllegalStateException("Agent 超过最大循环次数 10 轮");

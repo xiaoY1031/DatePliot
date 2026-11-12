@@ -20,6 +20,10 @@ public record LlmMessage(
         return new LlmMessage(Role.USER, content, List.of(), null);
     }
 
+    public static LlmMessage system(String content) {
+        return new LlmMessage(Role.SYSTEM, content, List.of(), null);
+    }
+
     public static LlmMessage assistant(String content, List<LlmToolCall> toolCalls) {
         return new LlmMessage(Role.ASSISTANT, content, toolCalls, null);
     }
@@ -29,6 +33,7 @@ public record LlmMessage(
     }
 
     public enum Role {
+        SYSTEM("system"),
         USER("user"),
         ASSISTANT("assistant"),
         TOOL("tool");
