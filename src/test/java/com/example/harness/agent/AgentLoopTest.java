@@ -6,6 +6,7 @@ import com.example.harness.llm.model.LlmMessage;
 import com.example.harness.llm.model.LlmRequest;
 import com.example.harness.llm.model.LlmResponse;
 import com.example.harness.llm.model.LlmToolCall;
+import com.example.harness.skill.SkillLoader;
 import com.example.harness.task.TaskState;
 import com.example.harness.task.TaskStore;
 import com.example.harness.tool.ProjectInfoTool;
@@ -13,9 +14,13 @@ import com.example.harness.tool.ToolExecutor;
 import com.example.harness.tool.ToolRegistry;
 import com.example.harness.tool.ToolResult;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.core.io.ByteArrayResource;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -30,6 +35,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class AgentLoopTest {
+
+    @TempDir
+    Path temporaryDirectory;
 
     @Test
     void savesFinalAssistantAnswerAndUsesSystemContext() {
@@ -146,6 +154,7 @@ class AgentLoopTest {
         TaskStore store = new TaskStore();
         ContextManager contextManager = new ContextManager(
                 store,
+                emptySkillLoader(),
                 new ByteArrayResource("系统提示".getBytes(StandardCharsets.UTF_8)));
         LlmClient client = mock(LlmClient.class);
         ToolExecutor executor = mock(ToolExecutor.class);
@@ -155,6 +164,16 @@ class AgentLoopTest {
                 new ToolRegistry(List.of(new ProjectInfoTool())),
                 contextManager);
         return new Fixture(loop, client, executor, store.create(goal));
+    }
+
+    private SkillLoader emptySkillLoader() {
+        try {
+            Path root = Files.createDirectory(
+                    temporaryDirectory.resolve("skills-" + System.nanoTime()));
+            return new SkillLoader(root.toString());
+        } catch (IOException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private LlmResponse response(String content) {

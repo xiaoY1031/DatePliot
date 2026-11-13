@@ -2,18 +2,28 @@ package com.example.harness.context;
 
 import com.example.harness.llm.model.LlmMessage;
 import com.example.harness.llm.model.LlmToolCall;
+import com.example.harness.skill.SkillLoader;
 import com.example.harness.task.TaskState;
 import com.example.harness.task.TaskStore;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.core.io.ByteArrayResource;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ContextManagerTest {
+
+    @TempDir
+    Path temporaryDirectory;
 
     @Test
     void buildsSystemTaskAndConversationContextInOrder() {
@@ -31,6 +41,35 @@ class ContextManagerTest {
         assertEquals(LlmMessage.Role.USER, messages.get(2).role());
         assertEquals(LlmMessage.Role.ASSISTANT, messages.get(3).role());
         assertEquals(2, task.conversationHistory().size());
+    }
+
+    @Test
+    void injectsOnlySkillMetadataAndExplainsOnDemandLoading() throws IOException {
+        Path skillsRoot = Files.createDirectory(temporaryDirectory.resolve("catalog"));
+        Path skillDirectory = Files.createDirectory(skillsRoot.resolve("data-analysis"));
+        Files.writeString(skillDirectory.resolve("SKILL.md"), """
+                ---
+                name: data-analysis
+                description: 分析已有数据并发现趋势
+                ---
+                私有指令正文不能提前进入 Catalog。
+                """);
+        TaskStore store = new TaskStore();
+        ContextManager manager = new ContextManager(
+                store,
+                new SkillLoader(skillsRoot.toString()),
+                new ByteArrayResource("基础系统提示".getBytes(StandardCharsets.UTF_8)));
+        TaskState task = store.create("分析数据");
+
+        List<LlmMessage> messages = manager.buildMessages(task);
+
+        assertEquals("基础系统提示", messages.get(0).content());
+        assertEquals(LlmMessage.Role.SYSTEM, messages.get(1).role());
+        assertTrue(messages.get(1).content().contains("data-analysis"));
+        assertTrue(messages.get(1).content().contains("分析已有数据并发现趋势"));
+        assertTrue(messages.get(1).content().contains("load_skill"));
+        assertFalse(messages.get(1).content().contains("私有指令正文"));
+        assertEquals("当前任务目标：分析数据", messages.get(2).content());
     }
 
     @Test
@@ -103,6 +142,16 @@ class ContextManagerTest {
 
     private ContextManager manager(TaskStore store) {
         return new ContextManager(store,
+                emptySkillLoader(),
                 new ByteArrayResource("基础系统提示".getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private SkillLoader emptySkillLoader() {
+        try {
+            return new SkillLoader(Files.createDirectory(
+                    temporaryDirectory.resolve("empty-" + System.nanoTime())).toString());
+        } catch (IOException e) {
+            throw new IllegalStateException(e);
+        }
     }
 }

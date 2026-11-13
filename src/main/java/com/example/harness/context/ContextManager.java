@@ -1,6 +1,7 @@
 package com.example.harness.context;
 
 import com.example.harness.llm.model.LlmMessage;
+import com.example.harness.skill.SkillLoader;
 import com.example.harness.task.TaskState;
 import com.example.harness.task.TaskStore;
 import org.springframework.beans.factory.annotation.Value;
@@ -19,12 +20,15 @@ import java.util.Set;
 public class ContextManager {
 
     private final TaskStore taskStore;
+    private final SkillLoader skillLoader;
     private final String systemPrompt;
 
     public ContextManager(
             TaskStore taskStore,
+            SkillLoader skillLoader,
             @Value("classpath:prompts/system.md") Resource systemPromptResource) {
         this.taskStore = taskStore;
+        this.skillLoader = skillLoader;
         this.systemPrompt = readPrompt(systemPromptResource);
     }
 
@@ -32,9 +36,31 @@ public class ContextManager {
     public List<LlmMessage> buildMessages(TaskState task) {
         List<LlmMessage> messages = new ArrayList<>();
         messages.add(LlmMessage.system(systemPrompt));
+        String skillCatalog = buildSkillCatalog();
+        if (skillCatalog != null) {
+            messages.add(LlmMessage.system(skillCatalog));
+        }
         messages.add(LlmMessage.system("当前任务目标：" + task.goal()));
         messages.addAll(taskStore.history(task));
         return List.copyOf(messages);
+    }
+
+    private String buildSkillCatalog() {
+        var metadata = skillLoader.listMetadata();
+        if (metadata.isEmpty()) {
+            return null;
+        }
+
+        StringBuilder catalog = new StringBuilder(
+                "可用 Skills（以下仅包含名称和描述；需要完整工作指令时调用 load_skill）：\n");
+        metadata.forEach(skill -> catalog.append("- ")
+                    .append(skill.name())
+                    .append("：")
+                    .append(skill.description())
+                    .append('\n'));
+        catalog.append("只加载当前任务需要的 Skill。调用前先检查对话历史；若其中已包含该 Skill 的完整指令，不要重复加载。"
+                + "Skill 只提供工作方法，不代表当前已具备相应执行工具；缺少工具时必须说明限制，不得伪造执行结果。");
+        return catalog.toString();
     }
 
     public void appendUserMessage(TaskState task, String content) {

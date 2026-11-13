@@ -8,3 +8,6 @@ qwen:
 
 harness:
   workspace: "F:/project"
+
+datapilot:
+  skills-directory: ${DATAPILOT_SKILLS_DIR:skills}
